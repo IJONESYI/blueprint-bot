@@ -302,9 +302,9 @@ async def remove_blueprint(interaction: discord.Interaction, item: str):
         except Exception:
             pass
 
+
 # -------------------- RUN --------------------
 async def main():
-    # Basic env checks
     if not DISCORD_TOKEN or not MONGODB_URI:
         print("❌ Please set DISCORD_TOKEN and MONGODB_URI environment variables.")
         return
@@ -314,3 +314,22 @@ async def main():
     except Exception as e:
         print(f"❌ MongoDB connection error: {e}")
         return
+
+    try:
+        print("🔑 Attempting bot login...")
+        await bot.start(DISCORD_TOKEN)
+    except discord.errors.LoginFailure as e:
+        print(f"❌ Login failure: invalid token? {e}")
+    except Exception as e:
+        print(f"❌ Unexpected error during bot.start(): {e}")
+    finally:
+        try:
+            await bot.close()
+        except Exception:
+            pass
+
+@bot.event
+async def on_ready():
+    # This proves the bot has logged in and connected to the gateway
+    print(f"🤖 Bot is online as {bot.user} (ID: {bot.user.id})")
+``
