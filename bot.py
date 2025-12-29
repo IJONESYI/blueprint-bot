@@ -106,17 +106,15 @@ BLUEPRINT_CATALOG: Dict[str, str] = {
 BLUEPRINT_NAMES_SORTED: List[str] = sorted(BLUEPRINT_CATALOG.keys())
 
 
-
-
 # -------------------- DATABASE --------------------
 mongo_client = MongoClient(MONGODB_URI) if MONGODB_URI else None
-db = mongo_client[DB_NAME] if mongo_client else None
-blueprints_col = db[COLLECTION_NAME] if db else None
+db = mongo_client[DB_NAME] if mongo_client is not None else None
+blueprints_col = db[COLLECTION_NAME] if db is not None else None
 
 async def ensure_db_connected() -> None:
     """Ping Mongo so we fail fast & clear in logs."""
-    if not mongo_client:
-        raise RuntimeError("MONGODB_URI is not set.")
+    if mongo_client is None or db is None or blueprints_col is None:
+        raise RuntimeError("MongoDB not configured: check MONGODB_URI and DB_NAME.")
     await asyncio.to_thread(lambda: mongo_client.admin.command("ping"))
     print("✅ Connected to MongoDB")
 
