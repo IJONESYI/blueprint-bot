@@ -7,16 +7,19 @@ from discord import app_commands
 from discord.ext import commands
 from pymongo import MongoClient
 
+# ------------- INTENTS (correct + unified) -------------
+
+intents = discord.Intents.default()
+intents.message_content = True
+intents.members = True
+intents.presences = True
+
 # ------------- CONFIG -------------
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")  # set in Railway
 MONGODB_URI = os.getenv("MONGODB_URI")      # set in Railway
 DB_NAME = "blueprint_market"
 COLLECTION_NAME = "blueprints"
-
-INTENTS = discord.Intents.default()
-INTENTS.message_content = False
-INTENTS.members = True
 
 # ------------- STATIC BLUEPRINT CATALOG -------------
 
@@ -128,7 +131,6 @@ class BlueprintDropdown(discord.ui.Select):
         selected_name = self.values[0]
         thumbnail_url = BLUEPRINT_CATALOG[selected_name]
 
-        # Insert a separate entry for this copy
         doc = {
             "name": selected_name,
             "thumbnail_url": thumbnail_url,
@@ -152,12 +154,11 @@ class BlueprintBot(commands.Bot):
     def __init__(self):
         super().__init__(
             command_prefix="!",
-            intents=INTENTS,
-            application_id=None  # can be set explicitly if needed
+            intents=intents,   # <-- FIXED: use the correct intents object
+            application_id=None
         )
 
     async def setup_hook(self):
-        # Sync commands on startup
         await self.tree.sync()
 
 
