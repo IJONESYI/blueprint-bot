@@ -159,6 +159,7 @@ class BlueprintBot(commands.Bot):
         )
 
     async def setup_hook(self):
+        # Force global sync
         synced = await self.tree.sync()
         print(f"Synced {len(synced)} commands globally.")
 
@@ -169,6 +170,7 @@ bot = BlueprintBot()
 @bot.event
 async def on_ready():
     print(f"Bot is online as {bot.user}")
+
 
 # ------------- SLASH COMMANDS -------------
 
