@@ -332,4 +332,3 @@ async def main():
 async def on_ready():
     # This proves the bot has logged in and connected to the gateway
     print(f"🤖 Bot is online as {bot.user} (ID: {bot.user.id})")
-``
