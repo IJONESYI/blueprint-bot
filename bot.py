@@ -154,15 +154,22 @@ class BlueprintBot(commands.Bot):
     def __init__(self):
         super().__init__(
             command_prefix="!",
-            intents=intents,   # <-- FIXED: use the correct intents object
-            application_id=None
+            intents=intents,
+            application_id=1455246157633818674
         )
 
     async def setup_hook(self):
-        await self.tree.sync()
+        # Force global sync
+        synced = await self.tree.sync()
+        print(f"Synced {len(synced)} commands globally.")
 
 
 bot = BlueprintBot()
+
+
+@bot.event
+async def on_ready():
+    print(f"Bot is online as {bot.user}")
 
 
 # ------------- SLASH COMMANDS -------------
