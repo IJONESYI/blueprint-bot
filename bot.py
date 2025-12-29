@@ -303,32 +303,55 @@ async def remove_blueprint(interaction: discord.Interaction, item: str):
             pass
 
 
-# -------------------- RUN --------------------
+
+# -------------------- RUN (diagnostic) --------------------
+import sys
+import traceback
+
+@bot.event
+async def on_ready():
+    # Confirms the bot connected to the gateway (you should see this in Railway logs)
+    print(f"🤖 Bot is online as {bot.user} (ID: {bot.user.id})")
+
 async def main():
+    # Print environment snapshot to logs
+    print(f"🐍 Python version: {sys.version}")
+    print(f"🔧 DISCORD_TOKEN present: {bool(os.getenv('DISCORD_TOKEN'))}")
+    print(f"🔧 MONGODB_URI present: {bool(os.getenv('MONGODB_URI'))}")
+    print(f"🔧 DISCORD_GUILD_ID: {os.getenv('DISCORD_GUILD_ID')}")
+
+    # Fail fast on missing env
     if not DISCORD_TOKEN or not MONGODB_URI:
-        print("❌ Please set DISCORD_TOKEN and MONGODB_URI environment variables.")
+        print("❌ Missing DISCORD_TOKEN or MONGODB_URI; aborting startup.")
         return
 
+    # DB connectivity check
     try:
         await ensure_db_connected()
     except Exception as e:
-        print(f"❌ MongoDB connection error: {e}")
+        print("❌ MongoDB connection error:")
+        traceback.print_exception(type(e), e, e.__traceback__)
         return
 
+    # Attempt login
     try:
         print("🔑 Attempting bot login...")
         await bot.start(DISCORD_TOKEN)
     except discord.errors.LoginFailure as e:
-        print(f"❌ Login failure: invalid token? {e}")
+        print("❌ LoginFailure: The token is invalid or stale.")
+        traceback.print_exception(type(e), e, e.__traceback__)
     except Exception as e:
-        print(f"❌ Unexpected error during bot.start(): {e}")
+        print("❌ Unexpected error during bot.start():")
+        traceback.print_exception(type(e), e, e.__traceback__)
     finally:
         try:
             await bot.close()
         except Exception:
             pass
 
-@bot.event
-async def on_ready():
-    # This proves the bot has logged in and connected to the gateway
-    print(f"🤖 Bot is online as {bot.user} (ID: {bot.user.id})")
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except Exception as e:
+        print("❌ Fatal exception in asyncio.run(main()):")
+        traceback.print_exception(type(e), e, e.__traceback__)
