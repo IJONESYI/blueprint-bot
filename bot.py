@@ -1,22 +1,27 @@
+
+# bot.py
 import os
 import asyncio
 from typing import List, Dict
-
 import discord
+from discord import app_commands
 from discord.ext import commands
 from pymongo import MongoClient
+from bson.objectid import ObjectId
 
-# ------------- INTENTS -------------
+# -------------------- INTENTS (minimal & safe) --------------------
+# We do NOT require Message Content anymore since we avoid free-text replies.
 intents = discord.Intents.default()
-intents.message_content = True
-intents.members = True
-intents.presences = True
+intents.guilds = True
 
-# ------------- CONFIG -------------
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-MONGODB_URI = os.getenv("MONGODB_URI")
+# -------------------- CONFIG --------------------
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")        # set in Railway
+MONGODB_URI  = os.getenv("MONGODB_URI")           # set in Railway
+DEV_GUILD_ID = os.getenv("DISCORD_GUILD_ID")      # for instant slash sync
+
 DB_NAME = "blueprint_market"
 COLLECTION_NAME = "blueprints"
+
 
 # ------------- STATIC BLUEPRINT CATALOG -------------
 
@@ -101,193 +106,213 @@ BLUEPRINT_CATALOG: Dict[str, str] = {
 BLUEPRINT_NAMES_SORTED: List[str] = sorted(BLUEPRINT_CATALOG.keys())
 
 
-# ------------- DATABASE -------------
-mongo_client = MongoClient(MONGODB_URI)
-db = mongo_client[DB_NAME]
-blueprints_col = db[COLLECTION_NAME]
-
-# ------------- DISCORD BOT SETUP -------------
-
-class BlueprintDropdown(discord.ui.Select):
-    def __init__(self, user_id: int):
-        options = [
-            discord.SelectOption(label=name, value=name)
-            for name in BLUEPRINT_NAMES_SORTED
-        ]
-        super().__init__(
-            placeholder="Select a blueprint to add...",
-            min_values=1,
-            max_values=1,
-            options=options
-        )
-        self.user_id = user_id
-
-    async def callback(self, interaction: discord.Interaction):
-        selected_name = self.values[0]
-        thumbnail_url = BLUEPRINT_CATALOG[selected_name]
-
-        doc = {
-            "name": selected_name,
-            "thumbnail_url": thumbnail_url,
-            "owner_id": interaction.user.id,
-        }
-        blueprints_col.insert_one(doc)
-
-        await interaction.response.edit_message(
-            content=f"Added **{selected_name}** to your extras.",
-            view=None
-        )
 
 
-class BlueprintDropdownView(discord.ui.View):
-    def __init__(self, user_id: int, timeout: float = 60.0):
-        super().__init__(timeout=timeout)
-        self.add_item(BlueprintDropdown(user_id))
+# -------------------- DATABASE --------------------
+mongo_client = MongoClient(MONGODB_URI) if MONGODB_URI else None
+db = mongo_client[DB_NAME] if mongo_client else None
+blueprints_col = db[COLLECTION_NAME] if db else None
 
+async def ensure_db_connected() -> None:
+    """Ping Mongo so we fail fast & clear in logs."""
+    if not mongo_client:
+        raise RuntimeError("MONGODB_URI is not set.")
+    await asyncio.to_thread(lambda: mongo_client.admin.command("ping"))
+    print("✅ Connected to MongoDB")
 
+# -------------------- DISCORD BOT SETUP --------------------
 class BlueprintBot(commands.Bot):
     def __init__(self):
-        super().__init__(
-            command_prefix="!",
-            intents=intents,
-            application_id=1455246157633818674
-        )
+        # Remove hard-coded application_id; let discord.py manage it
+        super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
-        synced = await self.tree.sync()
-        print(f"Synced {len(synced)} commands globally.")
+        # Prefer guild sync during development (instant); global is slower
+        if DEV_GUILD_ID:
+            dev_guild = discord.Object(id=int(DEV_GUILD_ID))
+            # Copy global commands to dev guild and sync instantly
+            self.tree.copy_global_to(guild=dev_guild)
+            await self.tree.sync(guild=dev_guild)
+            print(f"🔄 Synced commands to dev guild {DEV_GUILD_ID}.")
+        else:
+            synced = await self.tree.sync()
+            print(f"🔄 Synced {len(synced)} commands globally (may take time to appear).")
 
-
-# IMPORTANT: create bot BEFORE defining commands
 bot = BlueprintBot()
-
 
 @bot.event
 async def on_ready():
-    print(f"Bot is online as {bot.user}")
+    print(f"🤖 Bot is online as {bot.user} (ID: {bot.user.id})")
 
+# -------------------- AUTOCOMPLETE HELPERS --------------------
+async def blueprint_autocomplete(interaction: discord.Interaction, current: str):
+    """Autocomplete across the full catalog; returns up to 25 suggestions."""
+    choices = [
+        app_commands.Choice(name=name, value=name)
+        for name in BLUEPRINT_NAMES_SORTED
+        if current.lower() in name.lower()
+    ]
+    return choices[:25]  # Discord hard limit
 
-# ------------- SLASH COMMANDS -------------
+async def my_blueprints_autocomplete(interaction: discord.Interaction, current: str):
+    """Autocomplete only the invoking user's listed blueprints by name; value is the Mongo _id."""
+    try:
+        # Filter by owner_id
+        docs = list(blueprints_col.find({"owner_id": interaction.user.id}))
+        # Basic contains filter on name
+        filtered = [
+            doc for doc in docs
+            if current.lower() in str(doc.get("name", "")).lower()
+        ]
+        # Produce choices (label=name, value=_id)
+        choices = []
+        for doc in filtered[:25]:  # limit for autocomplete
+            name = doc.get("name", "Unknown")
+            oid = str(doc.get("_id"))
+            choices.append(app_commands.Choice(name=name, value=oid))
+        return choices
+    except Exception:
+        # On any DB hiccup, return empty to avoid breaking the interaction
+        return []
 
+# -------------------- SLASH COMMANDS --------------------
 @bot.tree.command(name="add_blueprint", description="Add one of your extra blueprints to the marketplace.")
-async def add_blueprint(interaction: discord.Interaction):
-    view = BlueprintDropdownView(interaction.user.id)
-    await interaction.response.send_message(
-        "Select the blueprint you want to add:",
-        view=view,
-        ephemeral=True
-    )
+@app_commands.describe(name="Blueprint name")
+@app_commands.autocomplete(name=blueprint_autocomplete)
+async def add_blueprint(interaction: discord.Interaction, name: str):
+    """Adds a blueprint selected via autocomplete."""
+    try:
+        await interaction.response.defer(ephemeral=True)  # acknowledge within 3s
 
+        thumbnail_url = BLUEPRINT_CATALOG.get(name)
+        if not thumbnail_url:
+            return await interaction.followup.send("Unknown blueprint name.", ephemeral=True)
+
+        # Insert into DB
+        blueprints_col.insert_one({
+            "name": name,
+            "thumbnail_url": thumbnail_url,
+            "owner_id": interaction.user.id,
+        })
+
+        await interaction.followup.send(f"✅ Added **{name}** to your extras.", ephemeral=True)
+    except Exception as e:
+        print("add_blueprint error:", e)
+        try:
+            await interaction.followup.send(f"❌ DB or interaction error: {e}", ephemeral=True)
+        except Exception:
+            pass
 
 @bot.tree.command(name="market", description="View all blueprints currently listed by everyone.")
 async def market(interaction: discord.Interaction):
-    docs = list(blueprints_col.find({}))
+    """Shows all listed blueprints (public)."""
+    try:
+        await interaction.response.defer()  # public reply
 
-    if not docs:
-        await interaction.response.send_message("No blueprints have been listed yet.", ephemeral=True)
-        return
+        docs = list(blueprints_col.find({}))
+        if not docs:
+            return await interaction.followup.send("No blueprints have been listed yet.")
 
-    embeds: List[discord.Embed] = []
-    for doc in docs:
-        name = doc.get("name", "Unknown")
-        thumbnail_url = doc.get("thumbnail_url")
-        owner_id = doc.get("owner_id")
-        owner_mention = f"<@{owner_id}>" if owner_id else "Unknown"
+        embeds: List[discord.Embed] = []
+        for doc in docs:
+            name = doc.get("name", "Unknown")
+            thumbnail_url = doc.get("thumbnail_url")
+            owner_id = doc.get("owner_id")
+            owner_mention = f"<@{owner_id}>" if owner_id else "Unknown"
 
-        embed = discord.Embed(
-            title=name,
-            description=f"Owner: {owner_mention}",
-            color=discord.Color.blue()
-        )
-        if thumbnail_url:
-            embed.set_thumbnail(url=thumbnail_url)
+            embed = discord.Embed(
+                title=name,
+                description=f"Owner: {owner_mention}",
+                color=discord.Color.blue(),
+            )
+            if thumbnail_url:
+                embed.set_thumbnail(url=thumbnail_url)
+            embeds.append(embed)
 
-        embeds.append(embed)
-
-    chunks = [embeds[i:i + 10] for i in range(0, len(embeds), 10)]
-
-    await interaction.response.send_message(embeds=chunks[0])
-    for chunk in chunks[1:]:
-        await interaction.followup.send(embeds=chunk)
-
+        # Discord allows up to 10 embeds per message
+        chunks = [embeds[i:i + 10] for i in range(0, len(embeds), 10)]
+        await interaction.followup.send(embeds=chunks[0])
+        for chunk in chunks[1:]:
+            await interaction.followup.send(embeds=chunk)
+    except Exception as e:
+        print("market error:", e)
+        try:
+            await interaction.followup.send(f"❌ Error: {e}")
+        except Exception:
+            pass
 
 @bot.tree.command(name="my_blueprints", description="View the blueprints you have listed.")
 async def my_blueprints(interaction: discord.Interaction):
-    docs = list(blueprints_col.find({"owner_id": interaction.user.id}))
+    """Shows only the invoking user's own listings (ephemeral)."""
+    try:
+        await interaction.response.defer(ephemeral=True)
 
-    if not docs:
-        await interaction.response.send_message("You haven't listed any blueprints yet.", ephemeral=True)
-        return
+        docs = list(blueprints_col.find({"owner_id": interaction.user.id}))
+        if not docs:
+            return await interaction.followup.send("You haven't listed any blueprints yet.", ephemeral=True)
 
-    embeds: List[discord.Embed] = []
-    for doc in docs:
-        name = doc.get("name", "Unknown")
-        thumbnail_url = doc.get("thumbnail_url")
+        embeds: List[discord.Embed] = []
+        for doc in docs:
+            name = doc.get("name", "Unknown")
+            thumbnail_url = doc.get("thumbnail_url")
+            embed = discord.Embed(
+                title=name,
+                description=f"Owner: {interaction.user.mention}",
+                color=discord.Color.green(),
+            )
+            if thumbnail_url:
+                embed.set_thumbnail(url=thumbnail_url)
+            embeds.append(embed)
 
-        embed = discord.Embed(
-            title=name,
-            description=f"Owner: {interaction.user.mention}",
-            color=discord.Color.green()
-        )
-        if thumbnail_url:
-            embed.set_thumbnail(url=thumbnail_url)
-
-        embeds.append(embed)
-
-    chunks = [embeds[i:i + 10] for i in range(0, len(embeds), 10)]
-
-    await interaction.response.send_message(embeds=chunks[0], ephemeral=True)
-    for chunk in chunks[1:]:
-        await interaction.followup.send(embeds=chunk, ephemeral=True)
-
+        chunks = [embeds[i:i + 10] for i in range(0, len(embeds), 10)]
+        await interaction.followup.send(embeds=chunks[0], ephemeral=True)
+        for chunk in chunks[1:]:
+            await interaction.followup.send(embeds=chunk, ephemeral=True)
+    except Exception as e:
+        print("my_blueprints error:", e)
+        try:
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+        except Exception:
+            pass
 
 @bot.tree.command(name="remove_blueprint", description="Remove one of your listed blueprints.")
-async def remove_blueprint(interaction: discord.Interaction):
-    docs = list(blueprints_col.find({"owner_id": interaction.user.id}))
+@app_commands.describe(item="Choose one of your listed blueprints")
+@app_commands.autocomplete(item=my_blueprints_autocomplete)
+async def remove_blueprint(interaction: discord.Interaction, item: str):
+    """
+    Removes a blueprint selected via autocomplete.
+    The 'item' value is the MongoDB _id (string).
+    """
+    try:
+        await interaction.response.defer(ephemeral=True)
+        try:
+            oid = ObjectId(item)
+        except Exception:
+            return await interaction.followup.send("Invalid selection.", ephemeral=True)
 
-    if not docs:
-        await interaction.response.send_message("You don't have any blueprints listed.", ephemeral=True)
+        doc = blueprints_col.find_one({"_id": oid, "owner_id": interaction.user.id})
+        if not doc:
+            return await interaction.followup.send("Item not found or not owned by you.", ephemeral=True)
+
+        blueprints_col.delete_one({"_id": oid})
+        name = doc.get("name", "Unknown")
+        await interaction.followup.send(f"🗑️ Removed **{name}** from your listings.", ephemeral=True)
+    except Exception as e:
+        print("remove_blueprint error:", e)
+        try:
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+        except Exception:
+            pass
+
+# -------------------- RUN --------------------
+async def main():
+    # Basic env checks
+    if not DISCORD_TOKEN or not MONGODB_URI:
+        print("❌ Please set DISCORD_TOKEN and MONGODB_URI environment variables.")
         return
 
-    description_lines = []
-    for idx, doc in enumerate(docs, start=1):
-        description_lines.append(f"{idx}. {doc.get('name', 'Unknown')}")
-
-    embed = discord.Embed(
-        title="Your listed blueprints",
-        description="\n".join(description_lines),
-        color=discord.Color.orange()
-    )
-    embed.set_footer(text="Reply with the number of the blueprint you want to remove.")
-
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    def check(m: discord.Message):
-        return (
-            m.author.id == interaction.user.id
-            and m.channel.id == interaction.channel_id
-        )
-
     try:
-        msg = await bot.wait_for("message", check=check, timeout=60.0)
-        index = int(msg.content.strip())
-        if index < 1 or index > len(docs):
-            await interaction.followup.send("Invalid number. No blueprint removed.", ephemeral=True)
-            return
-
-        to_remove = docs[index - 1]
-        blueprints_col.delete_one({"_id": to_remove["_id"]})
-        await interaction.followup.send(f"Removed **{to_remove.get('name', 'Unknown')}** from your listings.", ephemeral=True)
-
-    except asyncio.TimeoutError:
-        await interaction.followup.send("Timed out waiting for a response. No blueprint removed.", ephemeral=True)
-    except ValueError:
-        await interaction.followup.send("Please reply with a valid number next time.", ephemeral=True)
-
-
-# ------------- RUN -------------
-if __name__ == "__main__":
-    if not DISCORD_TOKEN or not MONGODB_URI:
-        print("Please set DISCORD_TOKEN and MONGODB_URI environment variables.")
-    else:
-        bot.run(DISCORD_TOKEN)
+        await ensure_db_connected()
+    except Exception as e:
+        print(f"❌ MongoDB connection error: {e}")
+        return
