@@ -3,21 +3,18 @@ import asyncio
 from typing import List, Dict
 
 import discord
-from discord import app_commands
 from discord.ext import commands
 from pymongo import MongoClient
 
-# ------------- INTENTS (correct + unified) -------------
-
+# ------------- INTENTS -------------
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 intents.presences = True
 
 # ------------- CONFIG -------------
-
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")  # set in Railway
-MONGODB_URI = os.getenv("MONGODB_URI")      # set in Railway
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+MONGODB_URI = os.getenv("MONGODB_URI")
 DB_NAME = "blueprint_market"
 COLLECTION_NAME = "blueprints"
 
@@ -105,11 +102,9 @@ BLUEPRINT_NAMES_SORTED: List[str] = sorted(BLUEPRINT_CATALOG.keys())
 
 
 # ------------- DATABASE -------------
-
 mongo_client = MongoClient(MONGODB_URI)
 db = mongo_client[DB_NAME]
 blueprints_col = db[COLLECTION_NAME]
-
 
 # ------------- DISCORD BOT SETUP -------------
 
@@ -163,12 +158,14 @@ class BlueprintBot(commands.Bot):
         print(f"Synced {len(synced)} commands globally.")
 
 
+# IMPORTANT: create bot BEFORE defining commands
 bot = BlueprintBot()
 
 
 @bot.event
 async def on_ready():
     print(f"Bot is online as {bot.user}")
+
 
 # ------------- SLASH COMMANDS -------------
 
@@ -207,7 +204,6 @@ async def market(interaction: discord.Interaction):
 
         embeds.append(embed)
 
-    # Discord allows up to 10 embeds per message
     chunks = [embeds[i:i + 10] for i in range(0, len(embeds), 10)]
 
     await interaction.response.send_message(embeds=chunks[0])
@@ -253,7 +249,6 @@ async def remove_blueprint(interaction: discord.Interaction):
         await interaction.response.send_message("You don't have any blueprints listed.", ephemeral=True)
         return
 
-    # Build a simple numbered list for the user to pick from
     description_lines = []
     for idx, doc in enumerate(docs, start=1):
         description_lines.append(f"{idx}. {doc.get('name', 'Unknown')}")
@@ -291,7 +286,6 @@ async def remove_blueprint(interaction: discord.Interaction):
 
 
 # ------------- RUN -------------
-
 if __name__ == "__main__":
     if not DISCORD_TOKEN or not MONGODB_URI:
         print("Please set DISCORD_TOKEN and MONGODB_URI environment variables.")
